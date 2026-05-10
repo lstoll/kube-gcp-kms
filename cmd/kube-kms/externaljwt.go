@@ -54,7 +54,7 @@ func (s *externalJWTServer) Metadata(ctx context.Context, req *jwtsignerv1.Metad
 
 // refreshCache fetches the primary signing version and all ENABLED EC_SIGN_P256_SHA256
 // public keys from GCP KMS. Callers must not hold cacheMu.
-func (s *externalJWTServer) refreshCache(ctx context.Context) error {
+func (s *externalJWTServer) refreshCache(ctx context.Context) (err error) {
 	if s.client == nil {
 		return fmt.Errorf("no KMS client available")
 	}
@@ -65,6 +65,14 @@ func (s *externalJWTServer) refreshCache(ctx context.Context) error {
 	if s.cachedKeys != nil && time.Now().Before(s.cacheExpiry) {
 		return nil
 	}
+
+	defer func() {
+		if err != nil {
+			keyCacheRefreshTotal.WithLabelValues("error").Inc()
+		} else {
+			keyCacheRefreshTotal.WithLabelValues("success").Inc()
+		}
+	}()
 
 	key, err := s.client.GetCryptoKey(ctx, &kmspb.GetCryptoKeyRequest{Name: s.keyName})
 	if err != nil {
@@ -133,8 +141,15 @@ func (s *externalJWTServer) getCache(ctx context.Context) (keys []keyEntry, prim
 	return s.cachedKeys, s.cachedPrimaryVersion, nil
 }
 
-func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.FetchKeysRequest) (*jwtsignerv1.FetchKeysResponse, error) {
+func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.FetchKeysRequest) (_ *jwtsignerv1.FetchKeysResponse, err error) {
 	slog.Info("Handling FetchKeys request", "keyName", s.keyName)
+	defer func() {
+		if err != nil {
+			fetchKeysTotal.WithLabelValues("error").Inc()
+		} else {
+			fetchKeysTotal.WithLabelValues("success").Inc()
+		}
+	}()
 
 	keys, _, err := s.getCache(ctx)
 	if err != nil {
@@ -155,7 +170,17 @@ func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.Fetc
 	return resp, nil
 }
 
-func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRequest) (*jwtsignerv1.SignJWTResponse, error) {
+func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRequest) (_ *jwtsignerv1.SignJWTResponse, err error) {
+	start := time.Now()
+	defer func() {
+		signDuration.Observe(time.Since(start).Seconds())
+		if err != nil {
+			signTotal.WithLabelValues("error").Inc()
+		} else {
+			signTotal.WithLabelValues("success").Inc()
+		}
+	}()
+
 	_, primaryVersion, err := s.getCache(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get primary signing key: %w", err)

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	jwtsignerv1 "k8s.io/externaljwt/apis/v1"
 	kmsv2 "k8s.io/kms/apis/v2"
@@ -24,7 +26,8 @@ func main() {
 	kmsSocket := flag.String("kms-socket-path", "/var/run/kmsplugin/socket.sock", "Path to the KMS plugin Unix socket")
 	jwtSocket := flag.String("jwt-socket-path", "/var/run/jwtplugin/socket.sock", "Path to the JWT plugin Unix socket")
 	gcpKmsKey := flag.String("gcp-kms-key", "", "GCP KMS Key name for encryption/decryption")
-	gcpJwtKey := flag.String("gcp-jwt-key", "", "GCP KMS Key name for JWT signing (all enabled versions are used for verification; the primary version signs)")
+	gcpJwtKey   := flag.String("gcp-jwt-key", "", "GCP KMS Key name for JWT signing (all enabled versions are used for verification; the primary version signs)")
+	metricsAddr := flag.String("metrics-addr", ":9090", "Address to serve Prometheus metrics on (/metrics)")
 	flag.Parse()
 
 	if *gcpKmsKey == "" || *gcpJwtKey == "" {
@@ -84,6 +87,16 @@ func main() {
 
 	startServer(*kmsSocket, kmsGrpcServer, "KMS")
 	startServer(*jwtSocket, jwtGrpcServer, "External JWT")
+
+	slog.Info("Starting metrics server", "addr", *metricsAddr)
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		if err := http.ListenAndServe(*metricsAddr, mux); err != nil {
+			slog.Error("Metrics server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

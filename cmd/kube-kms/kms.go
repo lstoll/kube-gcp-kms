@@ -71,7 +71,17 @@ func (s *kmsServer) Status(ctx context.Context, req *kmsv2.StatusRequest) (*kmsv
 	}, nil
 }
 
-func (s *kmsServer) Encrypt(ctx context.Context, req *kmsv2.EncryptRequest) (*kmsv2.EncryptResponse, error) {
+func (s *kmsServer) Encrypt(ctx context.Context, req *kmsv2.EncryptRequest) (_ *kmsv2.EncryptResponse, err error) {
+	start := time.Now()
+	defer func() {
+		encryptDuration.Observe(time.Since(start).Seconds())
+		if err != nil {
+			encryptTotal.WithLabelValues("error").Inc()
+		} else {
+			encryptTotal.WithLabelValues("success").Inc()
+		}
+	}()
+
 	slog.Info("Handling Encrypt request", "uid", req.Uid, "keyID", s.keyID)
 	resp, err := s.client.Encrypt(ctx, &kmspb.EncryptRequest{
 		Name:      s.keyID,
@@ -94,7 +104,17 @@ func (s *kmsServer) Encrypt(ctx context.Context, req *kmsv2.EncryptRequest) (*km
 	}, nil
 }
 
-func (s *kmsServer) Decrypt(ctx context.Context, req *kmsv2.DecryptRequest) (*kmsv2.DecryptResponse, error) {
+func (s *kmsServer) Decrypt(ctx context.Context, req *kmsv2.DecryptRequest) (_ *kmsv2.DecryptResponse, err error) {
+	start := time.Now()
+	defer func() {
+		decryptDuration.Observe(time.Since(start).Seconds())
+		if err != nil {
+			decryptTotal.WithLabelValues("error").Inc()
+		} else {
+			decryptTotal.WithLabelValues("success").Inc()
+		}
+	}()
+
 	slog.Info("Handling Decrypt request", "uid", req.Uid, "keyID", s.keyID, "encryptedKeyID", req.KeyId)
 	resp, err := s.client.Decrypt(ctx, &kmspb.DecryptRequest{
 		Name:       s.keyID,
