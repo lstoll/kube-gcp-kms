@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,16 +20,27 @@ import (
 	kmsv2 "k8s.io/kms/apis/v2"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+var version = "dev"
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	kmsSocket := flag.String("kms-socket-path", "/var/run/kmsplugin/socket.sock", "Path to the KMS plugin Unix socket")
-	jwtSocket := flag.String("jwt-socket-path", "/var/run/jwtplugin/socket.sock", "Path to the JWT plugin Unix socket")
-	gcpKmsKey := flag.String("gcp-kms-key", "", "GCP KMS Key name for encryption/decryption")
+	kmsSocket   := flag.String("kms-socket-path", "/var/run/kmsplugin/socket.sock", "Path to the KMS plugin Unix socket")
+	jwtSocket   := flag.String("jwt-socket-path", "/var/run/jwtplugin/socket.sock", "Path to the JWT plugin Unix socket")
+	gcpKmsKey   := flag.String("gcp-kms-key", "", "GCP KMS Key name for encryption/decryption")
 	gcpJwtKey   := flag.String("gcp-jwt-key", "", "GCP KMS Key name for JWT signing (all enabled versions are used for verification; the primary version signs)")
 	metricsAddr := flag.String("metrics-addr", ":9090", "Address to serve Prometheus metrics on (/metrics)")
+	printVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *printVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
+	slog.Info("Starting kube-kms", "version", version)
 
 	if *gcpKmsKey == "" || *gcpJwtKey == "" {
 		slog.Error("Both --gcp-kms-key and --gcp-jwt-key must be set")

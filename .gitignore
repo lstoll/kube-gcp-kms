@@ -3,4 +3,5 @@ gcp-sa-key.json
 /.vagrant
 /k3s
 .env
+/output
 .claude/settings.local.json
