@@ -1,5 +1,7 @@
 gcp-sa-key.json
 /kube-gcp-kms
+/kube-kms
+/*.log
 /.vagrant
 /k3s
 .env
