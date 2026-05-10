@@ -9,14 +9,14 @@ Vagrant.configure("2") do |config|
 
   # Required: GCP resource names
   #   GCP_KMS_KEY=projects/p/locations/l/keyRings/r/cryptoKeys/k
-  #   GCP_JWT_KEY_VERSION=projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1
+  #   GCP_JWT_KEY=projects/p/locations/l/keyRings/r/cryptoKeys/k   (key name, not a specific version)
   # Required: GCP service account key JSON path (host path)
   #   GOOGLE_SA_KEY=/path/to/sa-key.json
   # Optional: custom (patched) k3s binary (see k3s-args-patch.diff)
   #   K3S_BINARY=/path/to/k3s
   k3s_binary    = ENV["K3S_BINARY"]
-  gcp_kms_key   = ENV["GCP_KMS_KEY"]   or abort "GCP_KMS_KEY must be set"
-  gcp_jwt_key   = ENV["GCP_JWT_KEY_VERSION"] or abort "GCP_JWT_KEY_VERSION must be set"
+  gcp_kms_key   = ENV["GCP_KMS_KEY"]  or abort "GCP_KMS_KEY must be set"
+  gcp_jwt_key   = ENV["GCP_JWT_KEY"]  or abort "GCP_JWT_KEY must be set"
   google_sa_key = ENV["GOOGLE_SA_KEY"] or abort "GOOGLE_SA_KEY must be set"
 
   if k3s_binary
@@ -62,7 +62,7 @@ Before=k3s.service
 [Service]
 ExecStart=/vagrant/kube-kms \\
   --gcp-kms-key=#{gcp_kms_key} \\
-  --gcp-jwt-key-version=#{gcp_jwt_key}
+  --gcp-jwt-key=#{gcp_jwt_key}
 Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/kube-kms-sa-key.json
 Restart=always
 RestartSec=5

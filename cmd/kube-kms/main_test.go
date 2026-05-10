@@ -23,21 +23,21 @@ func TestServers(t *testing.T) {
 	jwtSocket := filepath.Join(tmpDir, "jwt.sock")
 
 	kmsKey := os.Getenv("TEST_GCP_KMS_KEY")
-	jwtKeyVer := os.Getenv("TEST_GCP_JWT_KEY_VERSION")
+	jwtKey := os.Getenv("TEST_GCP_JWT_KEY")
 
 	var client *kms.KeyManagementClient
 	var err error
 
-	if kmsKey != "" && jwtKeyVer != "" {
+	if kmsKey != "" && jwtKey != "" {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
 			t.Fatalf("Failed to create KMS client: %v", err)
 		}
 		defer client.Close()
 	} else {
-		t.Log("TEST_GCP_KMS_KEY or TEST_GCP_JWT_KEY_VERSION not set, skipping integration test parts that require GCP")
+		t.Log("TEST_GCP_KMS_KEY or TEST_GCP_JWT_KEY not set, skipping integration test parts that require GCP")
 		kmsKey = "projects/test/locations/global/keyRings/test/cryptoKeys/test"
-		jwtKeyVer = "projects/test/locations/global/keyRings/test/cryptoKeys/test/cryptoKeyVersions/1"
+		jwtKey = "projects/test/locations/global/keyRings/test/cryptoKeys/test-signer"
 	}
 
 	kmsSvr := &kmsServer{
@@ -45,8 +45,8 @@ func TestServers(t *testing.T) {
 		keyID:  kmsKey,
 	}
 	jwtsSvr := &externalJWTServer{
-		client:       client,
-		keyVersionID: jwtKeyVer,
+		client:  client,
+		keyName: jwtKey,
 	}
 
 	kmsGrpcServer := grpc.NewServer()

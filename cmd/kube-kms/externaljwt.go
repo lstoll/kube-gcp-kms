@@ -15,6 +15,7 @@ import (
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
+	"google.golang.org/api/iterator"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	jwtsignerv1 "k8s.io/externaljwt/apis/v1"
 )
@@ -24,17 +25,24 @@ const (
 	keyCacheTTL           = keyRefreshHintSeconds * time.Second
 )
 
+type keyEntry struct {
+	versionName string
+	keyDER      []byte
+}
+
 type externalJWTServer struct {
 	jwtsignerv1.UnimplementedExternalJWTSignerServer
 
-	client       *kms.KeyManagementClient
-	keyVersionID string
+	client  *kms.KeyManagementClient
+	keyName string // CryptoKey resource name (not a specific version)
 
-	// cachedKeyDER is the DER-encoded public key, nil until first fetch.
-	// Refreshed when cacheExpiry passes, aligned with keyRefreshHintSeconds.
-	cachedKeyDER []byte
-	cacheExpiry  time.Time
-	cacheMu      sync.RWMutex
+	// cachedKeys holds all ENABLED EC_SIGN_P256_SHA256 versions.
+	// cachedPrimaryVersion is the version used for signing.
+	// Both are refreshed together on cache expiry.
+	cachedKeys           []keyEntry
+	cachedPrimaryVersion string
+	cacheExpiry          time.Time
+	cacheMu              sync.RWMutex
 }
 
 func (s *externalJWTServer) Metadata(ctx context.Context, req *jwtsignerv1.MetadataRequest) (*jwtsignerv1.MetadataResponse, error) {
@@ -44,75 +52,126 @@ func (s *externalJWTServer) Metadata(ctx context.Context, req *jwtsignerv1.Metad
 	}, nil
 }
 
-func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.FetchKeysRequest) (*jwtsignerv1.FetchKeysResponse, error) {
-	slog.Info("Handling FetchKeys request", "keyVersionID", s.keyVersionID)
-
-	s.cacheMu.RLock()
-	keyDER, expiry := s.cachedKeyDER, s.cacheExpiry
-	s.cacheMu.RUnlock()
-
-	if keyDER == nil || time.Now().After(expiry) {
-		var err error
-		keyDER, err = s.refreshKeyDER(ctx)
-		if err != nil {
-			return nil, err
-		}
+// refreshCache fetches the primary signing version and all ENABLED EC_SIGN_P256_SHA256
+// public keys from GCP KMS. Callers must not hold cacheMu.
+func (s *externalJWTServer) refreshCache(ctx context.Context) error {
+	if s.client == nil {
+		return fmt.Errorf("no KMS client available")
 	}
 
-	return &jwtsignerv1.FetchKeysResponse{
-		Keys: []*jwtsignerv1.Key{
-			{
-				KeyId: keyID(s.keyVersionID),
-				Key:   keyDER,
-			},
-		},
-		DataTimestamp:      timestamppb.Now(),
-		RefreshHintSeconds: keyRefreshHintSeconds,
-	}, nil
-}
-
-func (s *externalJWTServer) refreshKeyDER(ctx context.Context) ([]byte, error) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
 
-	if s.cachedKeyDER != nil && time.Now().Before(s.cacheExpiry) {
-		return s.cachedKeyDER, nil
+	if s.cachedKeys != nil && time.Now().Before(s.cacheExpiry) {
+		return nil
 	}
 
-	pk, err := s.client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{
-		Name: s.keyVersionID,
-	})
+	key, err := s.client.GetCryptoKey(ctx, &kmspb.GetCryptoKeyRequest{Name: s.keyName})
 	if err != nil {
-		slog.Error("Failed to get public key from GCP KMS", "error", err, "keyVersionID", s.keyVersionID)
-		return nil, fmt.Errorf("failed to get public key: %w", err)
+		return fmt.Errorf("get crypto key: %w", err)
+	}
+	if key.Primary == nil {
+		return fmt.Errorf("key %s has no primary version", s.keyName)
 	}
 
-	if pk.Algorithm != kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256 {
-		return nil, fmt.Errorf("unsupported key algorithm %s: only EC_SIGN_P256_SHA256 (ES256) is supported", pk.Algorithm)
+	var entries []keyEntry
+	it := s.client.ListCryptoKeyVersions(ctx, &kmspb.ListCryptoKeyVersionsRequest{
+		Parent: s.keyName,
+		Filter: "state=ENABLED",
+	})
+	for {
+		v, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("list key versions: %w", err)
+		}
+		if v.Algorithm != kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256 {
+			continue
+		}
+
+		pk, err := s.client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: v.Name})
+		if err != nil {
+			return fmt.Errorf("get public key for %s: %w", v.Name, err)
+		}
+
+		block, _ := pem.Decode([]byte(pk.Pem))
+		if block == nil {
+			return fmt.Errorf("failed to decode PEM for version %s", v.Name)
+		}
+
+		entries = append(entries, keyEntry{versionName: v.Name, keyDER: block.Bytes})
 	}
 
-	block, _ := pem.Decode([]byte(pk.Pem))
-	if block == nil {
-		slog.Error("Failed to decode PEM block", "keyVersionID", s.keyVersionID)
-		return nil, fmt.Errorf("failed to decode PEM block from public key")
+	if len(entries) == 0 {
+		return fmt.Errorf("no enabled EC_SIGN_P256_SHA256 versions found for %s", s.keyName)
 	}
 
-	s.cachedKeyDER = block.Bytes
+	s.cachedKeys = entries
+	s.cachedPrimaryVersion = key.Primary.Name
 	s.cacheExpiry = time.Now().Add(keyCacheTTL)
-	return s.cachedKeyDER, nil
+	slog.Info("Refreshed JWT key cache", "keyName", s.keyName, "primaryVersion", s.cachedPrimaryVersion, "numVersions", len(entries))
+	return nil
+}
+
+func (s *externalJWTServer) getCache(ctx context.Context) (keys []keyEntry, primaryVersion string, err error) {
+	s.cacheMu.RLock()
+	keys, primaryVersion, expiry := s.cachedKeys, s.cachedPrimaryVersion, s.cacheExpiry
+	s.cacheMu.RUnlock()
+
+	if keys != nil && time.Now().Before(expiry) {
+		return keys, primaryVersion, nil
+	}
+
+	if err := s.refreshCache(ctx); err != nil {
+		return nil, "", err
+	}
+
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cachedKeys, s.cachedPrimaryVersion, nil
+}
+
+func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.FetchKeysRequest) (*jwtsignerv1.FetchKeysResponse, error) {
+	slog.Info("Handling FetchKeys request", "keyName", s.keyName)
+
+	keys, _, err := s.getCache(ctx)
+	if err != nil {
+		slog.Error("Failed to fetch keys from GCP KMS", "error", err)
+		return nil, err
+	}
+
+	resp := &jwtsignerv1.FetchKeysResponse{
+		DataTimestamp:      timestamppb.Now(),
+		RefreshHintSeconds: keyRefreshHintSeconds,
+	}
+	for _, e := range keys {
+		resp.Keys = append(resp.Keys, &jwtsignerv1.Key{
+			KeyId: keyID(e.versionName),
+			Key:   e.keyDER,
+		})
+	}
+	return resp, nil
 }
 
 func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRequest) (*jwtsignerv1.SignJWTResponse, error) {
-	slog.Info("Handling Sign request", "keyVersionID", s.keyVersionID, "kid", keyID(s.keyVersionID))
+	_, primaryVersion, err := s.getCache(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary signing key: %w", err)
+	}
 
-	headerJSON := fmt.Sprintf(`{"alg":"ES256","typ":"JWT","kid":"%s"}`, keyID(s.keyVersionID))
+	kid := keyID(primaryVersion)
+	slog.Info("Handling Sign request", "keyName", s.keyName, "primaryVersion", primaryVersion, "kid", kid)
+
+	headerJSON := fmt.Sprintf(`{"alg":"ES256","typ":"JWT","kid":"%s"}`, kid)
 	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
 
 	signingString := headerB64 + "." + req.Claims
 	digest := sha256.Sum256([]byte(signingString))
 
 	signResp, err := s.client.AsymmetricSign(ctx, &kmspb.AsymmetricSignRequest{
-		Name: s.keyVersionID,
+		Name: primaryVersion,
 		Digest: &kmspb.Digest{
 			Digest: &kmspb.Digest_Sha256{
 				Sha256: digest[:],
@@ -120,7 +179,7 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 		},
 	})
 	if err != nil {
-		slog.Error("AsymmetricSign failed", "error", err, "keyVersionID", s.keyVersionID)
+		slog.Error("AsymmetricSign failed", "error", err, "primaryVersion", primaryVersion)
 		return nil, fmt.Errorf("failed to sign JWT: %w", err)
 	}
 
@@ -142,7 +201,7 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 	copy(sigBytes[32-len(rBytes):32], rBytes)
 	copy(sigBytes[64-len(sBytes):64], sBytes)
 
-	slog.Info("Signed JWT successfully")
+	slog.Info("Signed JWT successfully", "kid", kid)
 	return &jwtsignerv1.SignJWTResponse{
 		Header:    headerB64,
 		Signature: base64.RawURLEncoding.EncodeToString(sigBytes),
@@ -150,7 +209,7 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 }
 
 // keyID returns a short, stable identifier derived from the key version resource name.
-func keyID(keyVersionID string) string {
-	h := sha256.Sum256([]byte(keyVersionID))
+func keyID(keyVersionName string) string {
+	h := sha256.Sum256([]byte(keyVersionName))
 	return hex.EncodeToString(h[:])[0:12]
 }

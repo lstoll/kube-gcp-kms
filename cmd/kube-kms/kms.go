@@ -95,7 +95,7 @@ func (s *kmsServer) Encrypt(ctx context.Context, req *kmsv2.EncryptRequest) (*km
 }
 
 func (s *kmsServer) Decrypt(ctx context.Context, req *kmsv2.DecryptRequest) (*kmsv2.DecryptResponse, error) {
-	slog.Info("Handling Decrypt request", "uid", req.Uid, "keyID", s.keyID)
+	slog.Info("Handling Decrypt request", "uid", req.Uid, "keyID", s.keyID, "encryptedKeyID", req.KeyId)
 	resp, err := s.client.Decrypt(ctx, &kmspb.DecryptRequest{
 		Name:       s.keyID,
 		Ciphertext: req.Ciphertext,

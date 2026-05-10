@@ -24,11 +24,11 @@ func main() {
 	kmsSocket := flag.String("kms-socket-path", "/var/run/kmsplugin/socket.sock", "Path to the KMS plugin Unix socket")
 	jwtSocket := flag.String("jwt-socket-path", "/var/run/jwtplugin/socket.sock", "Path to the JWT plugin Unix socket")
 	gcpKmsKey := flag.String("gcp-kms-key", "", "GCP KMS Key name for encryption/decryption")
-	gcpJwtKeyVersion := flag.String("gcp-jwt-key-version", "", "GCP KMS Key Version name for JWT signing")
+	gcpJwtKey := flag.String("gcp-jwt-key", "", "GCP KMS Key name for JWT signing (all enabled versions are used for verification; the primary version signs)")
 	flag.Parse()
 
-	if *gcpKmsKey == "" || *gcpJwtKeyVersion == "" {
-		slog.Error("Both --gcp-kms-key and --gcp-jwt-key-version must be set")
+	if *gcpKmsKey == "" || *gcpJwtKey == "" {
+		slog.Error("Both --gcp-kms-key and --gcp-jwt-key must be set")
 		os.Exit(1)
 	}
 
@@ -46,8 +46,8 @@ func main() {
 	}
 
 	jwtsSvr := &externalJWTServer{
-		client:       client,
-		keyVersionID: *gcpJwtKeyVersion,
+		client:  client,
+		keyName: *gcpJwtKey,
 	}
 
 	kmsGrpcServer := grpc.NewServer()
