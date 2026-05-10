@@ -19,14 +19,22 @@ import (
 	jwtsignerv1 "k8s.io/externaljwt/apis/v1"
 )
 
+const (
+	keyRefreshHintSeconds = 3600
+	keyCacheTTL           = keyRefreshHintSeconds * time.Second
+)
+
 type externalJWTServer struct {
 	jwtsignerv1.UnimplementedExternalJWTSignerServer
 
 	client       *kms.KeyManagementClient
 	keyVersionID string
 
-	fetchResp   *jwtsignerv1.FetchKeysResponse
-	fetchRespMu sync.Mutex
+	// cachedKeyDER is the DER-encoded public key, nil until first fetch.
+	// Refreshed when cacheExpiry passes, aligned with keyRefreshHintSeconds.
+	cachedKeyDER []byte
+	cacheExpiry  time.Time
+	cacheMu      sync.RWMutex
 }
 
 func (s *externalJWTServer) Metadata(ctx context.Context, req *jwtsignerv1.MetadataRequest) (*jwtsignerv1.MetadataResponse, error) {
@@ -39,11 +47,36 @@ func (s *externalJWTServer) Metadata(ctx context.Context, req *jwtsignerv1.Metad
 func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.FetchKeysRequest) (*jwtsignerv1.FetchKeysResponse, error) {
 	slog.Info("Handling FetchKeys request", "keyVersionID", s.keyVersionID)
 
-	s.fetchRespMu.Lock()
-	defer s.fetchRespMu.Unlock()
+	s.cacheMu.RLock()
+	keyDER, expiry := s.cachedKeyDER, s.cacheExpiry
+	s.cacheMu.RUnlock()
 
-	if s.fetchResp != nil {
-		return s.fetchResp, nil
+	if keyDER == nil || time.Now().After(expiry) {
+		var err error
+		keyDER, err = s.refreshKeyDER(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &jwtsignerv1.FetchKeysResponse{
+		Keys: []*jwtsignerv1.Key{
+			{
+				KeyId: keyID(s.keyVersionID),
+				Key:   keyDER,
+			},
+		},
+		DataTimestamp:      timestamppb.Now(),
+		RefreshHintSeconds: keyRefreshHintSeconds,
+	}, nil
+}
+
+func (s *externalJWTServer) refreshKeyDER(ctx context.Context) ([]byte, error) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+
+	if s.cachedKeyDER != nil && time.Now().Before(s.cacheExpiry) {
+		return s.cachedKeyDER, nil
 	}
 
 	pk, err := s.client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{
@@ -54,39 +87,28 @@ func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.Fetc
 		return nil, fmt.Errorf("failed to get public key: %w", err)
 	}
 
+	if pk.Algorithm != kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256 {
+		return nil, fmt.Errorf("unsupported key algorithm %s: only EC_SIGN_P256_SHA256 (ES256) is supported", pk.Algorithm)
+	}
+
 	block, _ := pem.Decode([]byte(pk.Pem))
 	if block == nil {
 		slog.Error("Failed to decode PEM block", "keyVersionID", s.keyVersionID)
 		return nil, fmt.Errorf("failed to decode PEM block from public key")
 	}
 
-	s.fetchResp = &jwtsignerv1.FetchKeysResponse{
-		Keys: []*jwtsignerv1.Key{
-			{
-				KeyId: keyID(s.keyVersionID),
-				Key:   block.Bytes,
-			},
-		},
-		DataTimestamp:      timestamppb.Now(),
-		RefreshHintSeconds: 3600,
-	}
-
-	return s.fetchResp, nil
+	s.cachedKeyDER = block.Bytes
+	s.cacheExpiry = time.Now().Add(keyCacheTTL)
+	return s.cachedKeyDER, nil
 }
 
 func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRequest) (*jwtsignerv1.SignJWTResponse, error) {
-	decodedClaims, err := base64.RawURLEncoding.DecodeString(req.Claims)
-	if err != nil {
-		slog.Error("Failed to decode claims", "error", err)
-		return nil, fmt.Errorf("failed to decode claims: %w", err)
-	}
-	slog.Info("Handling Sign request", "keyVersionID", s.keyVersionID, "key-id", keyID(s.keyVersionID), "claims", string(decodedClaims))
+	slog.Info("Handling Sign request", "keyVersionID", s.keyVersionID, "kid", keyID(s.keyVersionID))
+
 	headerJSON := fmt.Sprintf(`{"alg":"ES256","typ":"JWT","kid":"%s"}`, keyID(s.keyVersionID))
 	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
 
-	claimsB64 := req.Claims
-
-	signingString := headerB64 + "." + claimsB64
+	signingString := headerB64 + "." + req.Claims
 	digest := sha256.Sum256([]byte(signingString))
 
 	signResp, err := s.client.AsymmetricSign(ctx, &kmspb.AsymmetricSignRequest{
@@ -102,7 +124,8 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 		return nil, fmt.Errorf("failed to sign JWT: %w", err)
 	}
 
-	// GCP KMS returns ASN.1 encoded ECDSA signature
+	// GCP KMS returns an ASN.1 DER-encoded ECDSA signature; JWT ES256 requires
+	// the raw 64-byte (R||S) encoding.
 	type ecdsaSignature struct {
 		R, S *big.Int
 	}
@@ -115,20 +138,18 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 	rBytes := sig.R.Bytes()
 	sBytes := sig.S.Bytes()
 
-	// ES256 requires 64 bytes (32 bytes R, 32 bytes S)
 	sigBytes := make([]byte, 64)
 	copy(sigBytes[32-len(rBytes):32], rBytes)
 	copy(sigBytes[64-len(sBytes):64], sBytes)
 
-	signatureB64 := base64.RawURLEncoding.EncodeToString(sigBytes)
-
-	slog.Info("Signed JWT")
+	slog.Info("Signed JWT successfully")
 	return &jwtsignerv1.SignJWTResponse{
 		Header:    headerB64,
-		Signature: signatureB64,
+		Signature: base64.RawURLEncoding.EncodeToString(sigBytes),
 	}, nil
 }
 
+// keyID returns a short, stable identifier derived from the key version resource name.
 func keyID(keyVersionID string) string {
 	h := sha256.Sum256([]byte(keyVersionID))
 	return hex.EncodeToString(h[:])[0:12]

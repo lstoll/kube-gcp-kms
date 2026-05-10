@@ -1,6 +1,6 @@
 module lds.li/kube-kms
 
-go 1.25.0
+go 1.26.0
 
 require (
 	cloud.google.com/go/kms v1.26.0

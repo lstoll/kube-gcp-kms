@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"google.golang.org/grpc"
@@ -66,6 +68,11 @@ func main() {
 			os.Exit(1)
 		}
 
+		if err := os.Chmod(socketPath, 0600); err != nil {
+			slog.Error("Failed to set socket permissions", "socket", socketPath, "error", err)
+			os.Exit(1)
+		}
+
 		slog.Info("Starting server", "name", name, "socket", socketPath)
 		go func() {
 			if err := server.Serve(listener); err != nil {
@@ -78,12 +85,29 @@ func main() {
 	startServer(*kmsSocket, kmsGrpcServer, "KMS")
 	startServer(*jwtSocket, jwtGrpcServer, "External JWT")
 
-	// Wait for termination signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
 	slog.Info("Shutting down...")
-	kmsGrpcServer.GracefulStop()
-	jwtGrpcServer.GracefulStop()
+
+	gracefulStop := func(svr *grpc.Server) {
+		done := make(chan struct{})
+		go func() { svr.GracefulStop(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			svr.Stop()
+		}
+	}
+
+	var wg sync.WaitGroup
+	for _, svr := range []*grpc.Server{kmsGrpcServer, jwtGrpcServer} {
+		wg.Add(1)
+		go func(s *grpc.Server) {
+			defer wg.Done()
+			gracefulStop(s)
+		}(svr)
+	}
+	wg.Wait()
 }

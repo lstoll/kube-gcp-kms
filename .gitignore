@@ -1,3 +1,6 @@
 gcp-sa-key.json
 /kube-kms
 /.vagrant
+/k3s
+.env
+.claude/settings.local.json

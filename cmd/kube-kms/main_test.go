@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"google.golang.org/grpc"
@@ -62,7 +62,8 @@ func TestServers(t *testing.T) {
 		}
 		go func() {
 			if err := server.Serve(listener); err != nil {
-				t.Logf("Failed to serve %s on %s: %v", name, socketPath, err)
+				// Serve returns nil on GracefulStop/Stop, so an error here is unexpected.
+				t.Errorf("server %s (%s) exited unexpectedly: %v", name, socketPath, err)
 			}
 		}()
 	}
@@ -70,11 +71,8 @@ func TestServers(t *testing.T) {
 	startServer(kmsSocket, kmsGrpcServer, "KMS")
 	startServer(jwtSocket, jwtGrpcServer, "External JWT")
 
-	defer kmsGrpcServer.Stop()
-	defer jwtGrpcServer.Stop()
-
-	// Wait a tiny bit for listeners to start
-	time.Sleep(100 * time.Millisecond)
+	t.Cleanup(kmsGrpcServer.Stop)
+	t.Cleanup(jwtGrpcServer.Stop)
 
 	kmsConn, err := grpc.NewClient("unix://"+kmsSocket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -131,8 +129,9 @@ func TestServers(t *testing.T) {
 		})
 
 		t.Run("SignFetch", func(t *testing.T) {
+			claims := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"test","iat":0}`))
 			signResp, err := jwtClient.Sign(ctx, &jwtsignerv1.SignJWTRequest{
-				Claims: "test-claims",
+				Claims: claims,
 			})
 			if err != nil {
 				t.Fatalf("Sign failed: %v", err)
