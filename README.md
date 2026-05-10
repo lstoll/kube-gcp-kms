@@ -1,4 +1,4 @@
-# kube-kms
+# kube-gcp-kms
 
 Kubernetes KMS v2 encryption provider and External JWT signer plugin backed by GCP Cloud KMS. Runs as a single binary exposing two Unix-socket gRPC servers for use with k3s (or any kube-apiserver that supports these interfaces).
 
@@ -26,7 +26,7 @@ If you use [direnv](https://direnv.net/), run `direnv allow` and the vars will b
 make vagrant-up
 ```
 
-This builds the Linux binary then runs `vagrant up`. Provisioning installs k3s, starts `kube-kms` as a systemd service, and runs `configure-k3s.sh` to wire the API server to both plugins.
+This builds the Linux binary then runs `vagrant up`. Provisioning installs k3s, starts `kube-gcp-kms` as a systemd service, and runs `configure-k3s.sh` to wire the API server to both plugins.
 
 **4. Verify:**
 
@@ -39,5 +39,5 @@ kubectl get secret test-kms-secret -o yaml  # ciphertext visible in etcd
 To iterate on the binary: run `make vagrant-reprovision` (rebuilds and re-runs provisioning), or for a faster loop just rebuild and restart the service inside the VM:
 
 ```sh
-make build && vagrant ssh -c 'sudo systemctl restart kube-kms'
+make build && vagrant ssh -c 'sudo systemctl restart kube-gcp-kms'
 ```

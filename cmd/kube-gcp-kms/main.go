@@ -40,7 +40,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	slog.Info("Starting kube-kms", "version", version)
+	slog.Info("Starting kube-gcp-kms", "version", version)
 
 	if *gcpKmsKey == "" || *gcpJwtKey == "" {
 		slog.Error("Both --gcp-kms-key and --gcp-jwt-key must be set")

@@ -2,7 +2,7 @@
 export
 
 GOARCH ?= arm64
-BINARY  := kube-kms
+BINARY  := kube-gcp-kms
 
 BUILD_DATE := $(shell date -u +%Y%m%dT%H%M%S)
 JJ_COMMIT  := $(shell jj log -r @ --no-graph -T 'commit_id.short(8)' 2>/dev/null || git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
@@ -11,15 +11,15 @@ LDFLAGS    := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build
 build:
-	GOOS=linux GOARCH=$(GOARCH) go build -o $(BINARY) ./cmd/kube-kms/
+	GOOS=linux GOARCH=$(GOARCH) go build -o $(BINARY) ./cmd/kube-gcp-kms/
 
 .PHONY: release
 release:
 	mkdir -p output
-	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o output/kube-kms_$(VERSION)_linux_amd64 ./cmd/kube-kms/
-	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o output/kube-kms_$(VERSION)_linux_arm64 ./cmd/kube-kms/
-	cd output && sha256sum kube-kms_$(VERSION)_linux_amd64 > kube-kms_$(VERSION)_linux_amd64.sha256
-	cd output && sha256sum kube-kms_$(VERSION)_linux_arm64 > kube-kms_$(VERSION)_linux_arm64.sha256
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o output/kube-gcp-kms_$(VERSION)_linux_amd64 ./cmd/kube-gcp-kms/
+	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o output/kube-gcp-kms_$(VERSION)_linux_arm64 ./cmd/kube-gcp-kms/
+	cd output && sha256sum kube-gcp-kms_$(VERSION)_linux_amd64 > kube-gcp-kms_$(VERSION)_linux_amd64.sha256
+	cd output && sha256sum kube-gcp-kms_$(VERSION)_linux_arm64 > kube-gcp-kms_$(VERSION)_linux_arm64.sha256
 	@echo ""
 	@echo "Version: $(VERSION)"
 	@cat output/*.sha256

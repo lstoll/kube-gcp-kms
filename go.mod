@@ -1,4 +1,4 @@
-module lds.li/kube-kms
+module lds.li/kube-gcp-kms
 
 go 1.26.0
 

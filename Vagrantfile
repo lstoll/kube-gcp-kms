@@ -46,24 +46,24 @@ Vagrant.configure("2") do |config|
     chown -R vagrant:vagrant /home/vagrant/.kube
 
     # Install GCP service account key
-    install -m 0600 /tmp/sa-key.json /etc/kube-kms-sa-key.json
+    install -m 0600 /tmp/sa-key.json /etc/kube-gcp-kms-sa-key.json
     rm /tmp/sa-key.json
 
     # Create Unix socket directories for the plugins
     mkdir -p /var/run/kmsplugin /var/run/jwtplugin
 
-    # Install kube-kms systemd service
-    cat <<EOF > /etc/systemd/system/kube-kms.service
+    # Install kube-gcp-kms systemd service
+    cat <<EOF > /etc/systemd/system/kube-gcp-kms.service
 [Unit]
-Description=kube-kms GCP KMS + JWT signer plugin
+Description=kube-gcp-kms GCP KMS + JWT signer plugin
 After=network.target
 Before=k3s.service
 
 [Service]
-ExecStart=/vagrant/kube-kms \\
+ExecStart=/vagrant/kube-gcp-kms \\
   --gcp-kms-key=#{gcp_kms_key} \\
   --gcp-jwt-key=#{gcp_jwt_key}
-Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/kube-kms-sa-key.json
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/kube-gcp-kms-sa-key.json
 Restart=always
 RestartSec=5
 
@@ -72,8 +72,8 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable kube-kms
-    systemctl start kube-kms
+    systemctl enable kube-gcp-kms
+    systemctl start kube-gcp-kms
 
     # Configure k3s to use the plugins
     /vagrant/configure-k3s.sh
