@@ -5,11 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/asn1"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,14 +33,15 @@ type keyEntry struct {
 type externalJWTServer struct {
 	jwtsignerv1.UnimplementedExternalJWTSignerServer
 
-	client  *kms.KeyManagementClient
-	keyName string // CryptoKey resource name (not a specific version)
+	client    *kms.KeyManagementClient
+	keyName   string        // CryptoKey resource name (not a specific version)
+	keyLeadIn time.Duration // minimum age of a version before it is used for signing
 
 	// cachedKeys holds all ENABLED EC_SIGN_P256_SHA256 versions.
-	// cachedPrimaryVersion is the version used for signing.
+	// cachedSigningVersion is the version used for signing.
 	// Both are refreshed together on cache expiry.
 	cachedKeys           []keyEntry
-	cachedPrimaryVersion string
+	cachedSigningVersion string
 	cacheExpiry          time.Time
 	cacheMu              sync.RWMutex
 }
@@ -52,8 +53,10 @@ func (s *externalJWTServer) Metadata(ctx context.Context, req *jwtsignerv1.Metad
 	}, nil
 }
 
-// refreshCache fetches the primary signing version and all ENABLED EC_SIGN_P256_SHA256
-// public keys from GCP KMS. Callers must not hold cacheMu.
+// refreshCache fetches all ENABLED EC_SIGN_P256_SHA256 key versions from GCP KMS.
+// The signing version is the newest version whose CreateTime is at least keyLeadIn ago,
+// giving time for the public key to propagate before it is used for signing.
+// Callers must not hold cacheMu.
 func (s *externalJWTServer) refreshCache(ctx context.Context) (err error) {
 	if s.client == nil {
 		return fmt.Errorf("no KMS client available")
@@ -74,15 +77,12 @@ func (s *externalJWTServer) refreshCache(ctx context.Context) (err error) {
 		}
 	}()
 
-	key, err := s.client.GetCryptoKey(ctx, &kmspb.GetCryptoKeyRequest{Name: s.keyName})
-	if err != nil {
-		return fmt.Errorf("get crypto key: %w", err)
-	}
-	if key.Primary == nil {
-		return fmt.Errorf("key %s has no primary version", s.keyName)
+	type versionEntry struct {
+		keyEntry
+		createTime time.Time
 	}
 
-	var entries []keyEntry
+	var versions []versionEntry
 	it := s.client.ListCryptoKeyVersions(ctx, &kmspb.ListCryptoKeyVersionsRequest{
 		Parent: s.keyName,
 		Filter: "state=ENABLED",
@@ -109,27 +109,60 @@ func (s *externalJWTServer) refreshCache(ctx context.Context) (err error) {
 			return fmt.Errorf("failed to decode PEM for version %s", v.Name)
 		}
 
-		entries = append(entries, keyEntry{versionName: v.Name, keyDER: block.Bytes})
+		ct := time.Time{}
+		if v.CreateTime != nil {
+			ct = v.CreateTime.AsTime()
+		}
+		versions = append(versions, versionEntry{
+			keyEntry:   keyEntry{versionName: v.Name, keyDER: block.Bytes},
+			createTime: ct,
+		})
 	}
 
-	if len(entries) == 0 {
+	if len(versions) == 0 {
 		return fmt.Errorf("no enabled EC_SIGN_P256_SHA256 versions found for %s", s.keyName)
 	}
 
+	// Sort newest-first so we can pick the newest version that has passed the lead-in window.
+	sort.Slice(versions, func(i, j int) bool {
+		return versions[i].createTime.After(versions[j].createTime)
+	})
+
+	cutoff := time.Now().Add(-s.keyLeadIn)
+	signingVersion := ""
+	for _, ve := range versions {
+		if ve.createTime.Before(cutoff) {
+			signingVersion = ve.versionName
+			break
+		}
+	}
+	if signingVersion == "" {
+		// No version has passed the lead-in period (e.g. initial setup). Use the
+		// oldest available version to minimise the chance of signing with a brand-new key.
+		signingVersion = versions[len(versions)-1].versionName
+		slog.Warn("No key version has passed the lead-in period; using oldest enabled version for signing",
+			"keyName", s.keyName, "signingVersion", signingVersion, "keyLeadIn", s.keyLeadIn)
+	}
+
+	entries := make([]keyEntry, len(versions))
+	for i, ve := range versions {
+		entries[i] = ve.keyEntry
+	}
+
 	s.cachedKeys = entries
-	s.cachedPrimaryVersion = key.Primary.Name
+	s.cachedSigningVersion = signingVersion
 	s.cacheExpiry = time.Now().Add(keyCacheTTL)
-	slog.Info("Refreshed JWT key cache", "keyName", s.keyName, "primaryVersion", s.cachedPrimaryVersion, "numVersions", len(entries))
+	slog.Info("Refreshed JWT key cache", "keyName", s.keyName, "signingVersion", signingVersion, "numVersions", len(entries))
 	return nil
 }
 
-func (s *externalJWTServer) getCache(ctx context.Context) (keys []keyEntry, primaryVersion string, err error) {
+func (s *externalJWTServer) getCache(ctx context.Context) (keys []keyEntry, signingVersion string, err error) {
 	s.cacheMu.RLock()
-	keys, primaryVersion, expiry := s.cachedKeys, s.cachedPrimaryVersion, s.cacheExpiry
+	keys, signingVersion, expiry := s.cachedKeys, s.cachedSigningVersion, s.cacheExpiry
 	s.cacheMu.RUnlock()
 
 	if keys != nil && time.Now().Before(expiry) {
-		return keys, primaryVersion, nil
+		return keys, signingVersion, nil
 	}
 
 	if err := s.refreshCache(ctx); err != nil {
@@ -138,7 +171,7 @@ func (s *externalJWTServer) getCache(ctx context.Context) (keys []keyEntry, prim
 
 	s.cacheMu.RLock()
 	defer s.cacheMu.RUnlock()
-	return s.cachedKeys, s.cachedPrimaryVersion, nil
+	return s.cachedKeys, s.cachedSigningVersion, nil
 }
 
 func (s *externalJWTServer) FetchKeys(ctx context.Context, req *jwtsignerv1.FetchKeysRequest) (_ *jwtsignerv1.FetchKeysResponse, err error) {
@@ -181,13 +214,13 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 		}
 	}()
 
-	_, primaryVersion, err := s.getCache(ctx)
+	_, signingVersion, err := s.getCache(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get primary signing key: %w", err)
+		return nil, fmt.Errorf("failed to get signing key: %w", err)
 	}
 
-	kid := keyID(primaryVersion)
-	slog.Info("Handling Sign request", "keyName", s.keyName, "primaryVersion", primaryVersion, "kid", kid)
+	kid := keyID(signingVersion)
+	slog.Info("Handling Sign request", "keyName", s.keyName, "signingVersion", signingVersion, "kid", kid)
 
 	headerJSON := fmt.Sprintf(`{"alg":"ES256","typ":"JWT","kid":"%s"}`, kid)
 	headerB64 := base64.RawURLEncoding.EncodeToString([]byte(headerJSON))
@@ -196,7 +229,7 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 	digest := sha256.Sum256([]byte(signingString))
 
 	signResp, err := s.client.AsymmetricSign(ctx, &kmspb.AsymmetricSignRequest{
-		Name: primaryVersion,
+		Name: signingVersion,
 		Digest: &kmspb.Digest{
 			Digest: &kmspb.Digest_Sha256{
 				Sha256: digest[:],
@@ -204,7 +237,7 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 		},
 	})
 	if err != nil {
-		slog.Error("AsymmetricSign failed", "error", err, "primaryVersion", primaryVersion)
+		slog.Error("AsymmetricSign failed", "error", err, "signingVersion", signingVersion)
 		return nil, fmt.Errorf("failed to sign JWT: %w", err)
 	}
 
@@ -236,5 +269,5 @@ func (s *externalJWTServer) Sign(ctx context.Context, req *jwtsignerv1.SignJWTRe
 // keyID returns a short, stable identifier derived from the key version resource name.
 func keyID(keyVersionName string) string {
 	h := sha256.Sum256([]byte(keyVersionName))
-	return hex.EncodeToString(h[:])[0:12]
+	return base64.RawURLEncoding.EncodeToString(h[:9])
 }

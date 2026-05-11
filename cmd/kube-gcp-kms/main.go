@@ -27,11 +27,12 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	kmsSocket   := flag.String("kms-socket-path", "/var/run/kmsplugin/socket.sock", "Path to the KMS plugin Unix socket")
-	jwtSocket   := flag.String("jwt-socket-path", "/var/run/jwtplugin/socket.sock", "Path to the JWT plugin Unix socket")
-	gcpKmsKey   := flag.String("gcp-kms-key", "", "GCP KMS Key name for encryption/decryption")
-	gcpJwtKey   := flag.String("gcp-jwt-key", "", "GCP KMS Key name for JWT signing (all enabled versions are used for verification; the primary version signs)")
-	metricsAddr := flag.String("metrics-addr", ":9090", "Address to serve Prometheus metrics on (/metrics)")
+	kmsSocket    := flag.String("kms-socket-path", "/var/run/kmsplugin/socket.sock", "Path to the KMS plugin Unix socket")
+	jwtSocket    := flag.String("jwt-socket-path", "/var/run/jwtplugin/socket.sock", "Path to the JWT plugin Unix socket")
+	gcpKmsKey    := flag.String("gcp-kms-key", "", "GCP KMS Key name for encryption/decryption")
+	gcpJwtKey    := flag.String("gcp-jwt-key", "", "GCP KMS Key name for JWT signing (all enabled versions are used for verification)")
+	jwtKeyLeadIn := flag.Duration("jwt-key-lead-in", 24*time.Hour, "Minimum age of a new JWT signing key version before it is used for signing, to allow public key propagation")
+	metricsAddr  := flag.String("metrics-addr", ":9090", "Address to serve Prometheus metrics on (/metrics)")
 	printVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -61,8 +62,9 @@ func main() {
 	}
 
 	jwtsSvr := &externalJWTServer{
-		client:  client,
-		keyName: *gcpJwtKey,
+		client:    client,
+		keyName:   *gcpJwtKey,
+		keyLeadIn: *jwtKeyLeadIn,
 	}
 
 	kmsGrpcServer := grpc.NewServer()
