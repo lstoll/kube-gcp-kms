@@ -5,7 +5,7 @@ GOARCH ?= arm64
 BINARY  := kube-gcp-kms
 
 BUILD_DATE := $(shell date -u +%Y%m%dT%H%M%S)
-JJ_COMMIT  := $(shell jj log -r @ --no-graph -T 'commit_id.short(8)' 2>/dev/null || git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+JJ_COMMIT  := $(shell jj log -r 'latest(::@ & ~empty())' --no-graph -T 'commit_id.short(8)' 2>/dev/null || git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
 VERSION    := $(BUILD_DATE)-$(JJ_COMMIT)
 LDFLAGS    := -ldflags "-X main.version=$(VERSION)"
 
